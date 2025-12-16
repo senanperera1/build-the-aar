@@ -141,7 +141,10 @@ jobs:
     - name: Build AAR
       run: |
         export PATH=$PATH:$HOME/go/bin
+        export GO111MODULE=on
         gomobile bind -v -target=android -androidapi=21 -ldflags="-s -w" -o libv2ray.aar ./libv2ray
+      env:
+        ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           
     - name: Upload AAR
       uses: actions/upload-artifact@v4
