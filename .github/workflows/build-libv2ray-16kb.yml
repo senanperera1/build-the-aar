@@ -34,7 +34,7 @@ jobs:
         gomobile init
         
     - name: Clone v2ray-core
-      run: git clone --depth 1 -b v5.20.0 https://github.com/v2fly/v2ray-core.git
+      run: git clone --depth 1 -b v5.16.1 https://github.com/v2fly/v2ray-core.git
         
     - name: Create wrapper
       run: |
@@ -135,7 +135,7 @@ jobs:
       run: |
         cd libv2ray
         go mod init libv2ray
-        go mod edit -require=github.com/v2fly/v2ray-core/v5@v5.20.0
+        go mod edit -require=github.com/v2fly/v2ray-core/v5@v5.16.1
         go mod tidy
         
     - name: Build AAR
