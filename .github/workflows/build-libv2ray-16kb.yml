@@ -1,4 +1,4 @@
-name: Convert My AAR to 16KB
+name: FINAL FIX - Convert to 16KB
 
 on:
   workflow_dispatch:
@@ -8,35 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repo to get the AAR
+    - name: Checkout
       uses: actions/checkout@v4
-        
-    - name: Verify AAR exists
-      run: |
-        ls -lh libv2ray.aar
-        file libv2ray.aar
-        
-    - name: Extract original AAR
-      run: |
-        mkdir -p aar_original
-        unzip -q libv2ray.aar -d aar_original
-        echo "Original AAR contents:"
-        find aar_original -type f | head -20
-        
-    - name: Check current page size
-      run: |
-        if [ -f aar_original/jni/arm64-v8a/libgojni.so ]; then
-          echo "✓ Found native library in original AAR!"
-          ls -lh aar_original/jni/arm64-v8a/libgojni.so
-          echo ""
-          echo "Current page alignment (should be 0x1000 = 4KB):"
-          readelf -l aar_original/jni/arm64-v8a/libgojni.so | grep LOAD | head -5
-        else
-          echo "ERROR: No arm64-v8a library found!"
-          echo "Available architectures:"
-          find aar_original/jni -type f
-          exit 1
-        fi
         
     - name: Setup Go
       uses: actions/setup-go@v5
@@ -61,19 +34,27 @@ jobs:
       run: |
         go install golang.org/x/mobile/cmd/gomobile@latest
         go install golang.org/x/mobile/cmd/gobind@latest
+        
+    - name: Init gomobile
+      run: |
         export PATH=$HOME/go/bin:$PATH
         export ANDROID_HOME=$ANDROID_SDK_ROOT
         export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973
-        gomobile init
-        echo "✓ Gomobile initialized"
+        $HOME/go/bin/gomobile init
         
-    - name: Clone v2ray-core
+    - name: Create build directory OUTSIDE repo
       run: |
+        mkdir -p /tmp/build
+        cd /tmp/build
+        
+    - name: Clone v2ray-core to build dir
+      run: |
+        cd /tmp/build
         git clone --depth 1 https://github.com/v2fly/v2ray-core.git
-        echo "✓ V2Ray core cloned"
         
-    - name: Create libv2ray wrapper
+    - name: Create libv2ray in build dir
       run: |
+        cd /tmp/build
         mkdir -p libv2ray
         cat > libv2ray/libv2ray.go << 'EOF'
         package libv2ray
@@ -166,86 +147,29 @@ jobs:
             return nil
         }
         EOF
-        echo "✓ Wrapper created"
         
-    - name: Setup Go module
+    - name: Setup module
       run: |
-        cd libv2ray
+        cd /tmp/build/libv2ray
         go mod init libv2ray
         go get github.com/v2fly/v2ray-core/v5@latest
         go mod tidy
-        echo "✓ Dependencies downloaded"
         
-    - name: Build new 16KB AAR
+    - name: Build AAR
       run: |
         export PATH=$HOME/go/bin:$PATH
         export ANDROID_HOME=$ANDROID_SDK_ROOT
         export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973
-        echo "Building AAR with 16KB page size support..."
-        gomobile bind -v -target=android -androidapi=21 -ldflags="-s -w" -o libv2ray-16kb.aar ./libv2ray
-        echo "✓ Build complete!"
+        cd /tmp/build
+        $HOME/go/bin/gomobile bind -v -target=android -androidapi=21 -ldflags="-s -w" -o libv2ray-16kb.aar ./libv2ray
         
-    - name: Verify new AAR
+    - name: Copy to workspace
       run: |
-        ls -lh libv2ray-16kb.aar
-        mkdir -p aar_new
-        unzip -q libv2ray-16kb.aar -d aar_new
-        if [ -f aar_new/jni/arm64-v8a/libgojni.so ]; then
-          echo "✓ New native library created!"
-          ls -lh aar_new/jni/arm64-v8a/libgojni.so
-          echo ""
-          echo "New page alignment (should be 0x4000 = 16KB):"
-          readelf -l aar_new/jni/arm64-v8a/libgojni.so | grep LOAD | head -5
-        fi
+        cp /tmp/build/libv2ray-16kb.aar $GITHUB_WORKSPACE/
+        ls -lh $GITHUB_WORKSPACE/libv2ray-16kb.aar
         
-    - name: Size comparison
-      run: |
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "           SIZE COMPARISON"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-        echo "Original AAR (4KB):"
-        ls -lh libv2ray.aar
-        echo ""
-        echo "New AAR (16KB):"
-        ls -lh libv2ray-16kb.aar
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        
-    - name: Upload converted AAR
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: libv2ray-16kb-READY
+        name: libv2ray-16kb-FINAL
         path: libv2ray-16kb.aar
-        
-    - name: Create success report
-      run: |
-        cat > SUCCESS.txt << 'REPORT'
-        ╔════════════════════════════════════════════╗
-        ║   ✓ CONVERSION SUCCESSFUL!                 ║
-        ╚════════════════════════════════════════════╝
-
-        Your AAR has been converted to 16KB page size!
-
-        Changes Made:
-        ✓ Page alignment: 4KB → 16KB
-        ✓ Compiled with NDK 27
-        ✓ Android 15+ compatible
-        ✓ API remains identical
-
-        Next Steps:
-        1. Download "libv2ray-16kb-READY" from Artifacts
-        2. Extract libv2ray-16kb.aar
-        3. Replace your old libv2ray.aar with this new one
-        4. Clean and rebuild your Android project
-        5. No code changes needed!
-
-        Your app will now work on Android 15+! 🎉
-        REPORT
-        cat SUCCESS.txt
-        
-    - name: Upload report
-      uses: actions/upload-artifact@v4
-      with:
-        name: SUCCESS-REPORT
-        path: SUCCESS.txt
