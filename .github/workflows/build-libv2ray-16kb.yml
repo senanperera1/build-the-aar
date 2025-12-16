@@ -1,4 +1,4 @@
-name: Build libv2ray 16KB
+name: Build libv2ray 16KB NUCLEAR
 
 on:
   workflow_dispatch:
@@ -8,20 +8,15 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout dummy repo
-      run: |
-        mkdir -p $GITHUB_WORKSPACE
-        cd $GITHUB_WORKSPACE
-        git init
-        git config user.name "GitHub Actions"
-        git config user.email "actions@github.com"
-        
-    - name: Setup Go
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Go 1.22
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version: '1.22.10'
 
-    - name: Setup JDK
+    - name: Setup JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
@@ -34,29 +29,55 @@ jobs:
       run: |
         echo "y" | sdkmanager --install "ndk;27.0.12077973"
         echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+        echo "NDK installed at: $ANDROID_SDK_ROOT/ndk/27.0.12077973"
         
-    - name: Install gomobile
+    - name: Setup Go environment variables
       run: |
-        go install golang.org/x/mobile/cmd/gomobile@latest
-        go install golang.org/x/mobile/cmd/gobind@latest
-        $HOME/go/bin/gomobile init
+        echo "GOPATH=$HOME/go" >> $GITHUB_ENV
+        echo "PATH=$HOME/go/bin:$PATH" >> $GITHUB_ENV
+        echo "GO111MODULE=on" >> $GITHUB_ENV
+        mkdir -p $HOME/go/bin
+        mkdir -p $HOME/go/pkg
+        mkdir -p $HOME/go/src
         
-    - name: Create GOPATH structure
+    - name: Clean Go cache
       run: |
-        mkdir -p $HOME/gopath/src
-        echo "GOPATH=$HOME/gopath" >> $GITHUB_ENV
+        go clean -modcache || true
+        rm -rf $HOME/go/pkg/mod || true
         
-    - name: Clone v2ray-core to GOPATH
+    - name: Install gomobile and gobind
       run: |
-        mkdir -p $HOME/gopath/src/github.com/v2fly
-        cd $HOME/gopath/src/github.com/v2fly
+        go install -v golang.org/x/mobile/cmd/gomobile@latest
+        go install -v golang.org/x/mobile/cmd/gobind@latest
+        ls -la $HOME/go/bin/
+        
+    - name: Initialize gomobile properly
+      run: |
+        export PATH=$HOME/go/bin:$PATH
+        export ANDROID_HOME=$ANDROID_SDK_ROOT
+        export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973
+        gomobile init -v -ndk $ANDROID_SDK_ROOT/ndk/27.0.12077973
+        echo "Gomobile initialized successfully"
+        
+    - name: Verify gomobile installation
+      run: |
+        export PATH=$HOME/go/bin:$PATH
+        which gomobile
+        which gobind
+        gomobile version || true
+        ls -la $HOME/go/pkg/gomobile || true
+        
+    - name: Clone v2ray-core
+      run: |
+        cd $GITHUB_WORKSPACE
         git clone --depth 1 -b v5.16.1 https://github.com/v2fly/v2ray-core.git
+        echo "V2Ray core cloned"
         
-    - name: Create libv2ray in GOPATH
+    - name: Create libv2ray wrapper
       run: |
-        mkdir -p $HOME/gopath/src/libv2ray
-        cd $HOME/gopath/src/libv2ray
-        cat > libv2ray.go << 'EOF'
+        cd $GITHUB_WORKSPACE
+        mkdir -p libv2ray
+        cat > libv2ray/libv2ray.go << 'EOFMARKER'
         package libv2ray
 
         import (
@@ -146,41 +167,118 @@ jobs:
             v.isRunning = false
             return nil
         }
-        EOF
+        EOFMARKER
+        echo "Wrapper created"
+        cat libv2ray/libv2ray.go
 
-    - name: Initialize go module
+    - name: Initialize go module with dependencies
       run: |
-        cd $HOME/gopath/src/libv2ray
-        go mod init libv2ray || true
-        go mod edit -require=github.com/v2fly/v2ray-core/v5@v5.16.1 || true
-        go mod tidy || true
+        cd $GITHUB_WORKSPACE/libv2ray
+        go mod init libv2ray
+        echo "Go module initialized"
         
-    - name: Download dependencies
+    - name: Add v2ray-core dependency
       run: |
-        cd $HOME/gopath/src/libv2ray
-        go get github.com/v2fly/v2ray-core/v5@v5.16.1 || true
-        go mod download || true
+        cd $GITHUB_WORKSPACE/libv2ray
+        go mod edit -require=github.com/v2fly/v2ray-core/v5@v5.16.1
+        echo "Dependency added"
+        cat go.mod
         
-    - name: Build AAR with all fixes
+    - name: Download all dependencies
       run: |
-        export PATH=$PATH:$HOME/go/bin
-        export GOPATH=$HOME/gopath
-        export GO111MODULE=auto
+        cd $GITHUB_WORKSPACE/libv2ray
+        go mod download
+        go mod tidy
+        echo "Dependencies downloaded"
+        
+    - name: Verify module is ready
+      run: |
+        cd $GITHUB_WORKSPACE/libv2ray
+        go list -m all
+        go build -v .
+        echo "Module verified and builds successfully"
+        
+    - name: Build AAR with gomobile
+      run: |
+        export PATH=$HOME/go/bin:$PATH
+        export ANDROID_HOME=$ANDROID_SDK_ROOT
+        export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973
         export CGO_ENABLED=1
-        cd $HOME/gopath/src
-        echo "Building from: $(pwd)"
+        cd $GITHUB_WORKSPACE
+        echo "Current directory: $(pwd)"
+        echo "Contents:"
         ls -la
-        $HOME/go/bin/gomobile bind -v -target=android -androidapi=21 -ldflags="-s -w" -o $GITHUB_WORKSPACE/libv2ray.aar libv2ray
-      env:
-        ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        echo "Building AAR..."
+        gomobile bind -v \
+          -target=android \
+          -androidapi=21 \
+          -ldflags="-s -w" \
+          -o libv2ray.aar \
+          ./libv2ray
+        echo "Build complete!"
         
-    - name: Verify AAR exists
+    - name: Verify AAR was created
       run: |
-        ls -lh $GITHUB_WORKSPACE/libv2ray.aar || echo "AAR NOT FOUND!"
-        file $GITHUB_WORKSPACE/libv2ray.aar || echo "Cannot check file type"
+        cd $GITHUB_WORKSPACE
+        if [ -f libv2ray.aar ]; then
+          echo "✓ AAR file created successfully!"
+          ls -lh libv2ray.aar
+          file libv2ray.aar
+          unzip -l libv2ray.aar | head -20
+        else
+          echo "✗ AAR file NOT found!"
+          ls -la
+          exit 1
+        fi
+        
+    - name: Extract and verify native library
+      run: |
+        cd $GITHUB_WORKSPACE
+        unzip -q libv2ray.aar -d aar_contents
+        echo "AAR contents:"
+        find aar_contents -type f
+        if [ -f aar_contents/jni/arm64-v8a/libgojni.so ]; then
+          echo "✓ Native library found!"
+          ls -lh aar_contents/jni/arm64-v8a/libgojni.so
+          readelf -h aar_contents/jni/arm64-v8a/libgojni.so | grep Machine || true
+        else
+          echo "✗ Native library NOT found!"
+        fi
           
-    - name: Upload AAR
+    - name: Upload AAR artifact
       uses: actions/upload-artifact@v4
       with:
         name: libv2ray-16kb-aar
         path: ${{ github.workspace }}/libv2ray.aar
+        if-no-files-found: error
+        
+    - name: Create release info
+      run: |
+        cd $GITHUB_WORKSPACE
+        cat > BUILD_INFO.txt << 'INFOEOF'
+        Build Information
+        =================
+        Date: $(date)
+        NDK Version: 27.0.12077973
+        Go Version: 1.22.10
+        V2Ray Core: v5.16.1
+        Target API: 21+
+        Architecture: arm64-v8a
+        Page Size: 16KB compatible
+        
+        File Details:
+        $(ls -lh libv2ray.aar)
+        
+        Usage:
+        1. Download libv2ray.aar
+        2. Replace old AAR in your Android project libs folder
+        3. Clean and rebuild your project
+        4. No code changes needed!
+        INFOEOF
+        cat BUILD_INFO.txt
+        
+    - name: Upload build info
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-info
+        path: ${{ github.workspace }}/BUILD_INFO.txt
