@@ -1,175 +1,71 @@
-name: FINAL FIX - Convert to 16KB
+name: Patch AAR to 16KB (No Rebuild)
 
 on:
   workflow_dispatch:
 
 jobs:
-  convert:
+  patch:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout
+    - name: Checkout to get AAR
       uses: actions/checkout@v4
-        
-    - name: Setup Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.22'
-
-    - name: Setup JDK
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
       
-    - name: Install NDK 27
+    - name: Install tools
       run: |
-        echo "y" | sdkmanager --install "ndk;27.0.12077973"
-        echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq binutils patchelf
         
-    - name: Install gomobile
+    - name: Extract AAR
       run: |
-        go install golang.org/x/mobile/cmd/gomobile@latest
-        go install golang.org/x/mobile/cmd/gobind@latest
+        mkdir -p aar_extracted
+        unzip -q libv2ray.aar -d aar_extracted
+        ls -la aar_extracted/
         
-    - name: Init gomobile
+    - name: Check original library
       run: |
-        export PATH=$HOME/go/bin:$PATH
-        export ANDROID_HOME=$ANDROID_SDK_ROOT
-        export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973
-        $HOME/go/bin/gomobile init
+        echo "Original native library:"
+        ls -lh aar_extracted/jni/arm64-v8a/libgojni.so
+        echo ""
+        echo "Current page alignment (0x1000 = 4KB):"
+        readelf -l aar_extracted/jni/arm64-v8a/libgojni.so | grep LOAD
         
-    - name: Create build directory OUTSIDE repo
+    - name: Setup NDK 27
       run: |
-        mkdir -p /tmp/build
-        cd /tmp/build
+        wget -q https://dl.google.com/android/repository/android-ndk-r27-linux.zip
+        unzip -q android-ndk-r27-linux.zip
+        export NDK_ROOT=$PWD/android-ndk-r27
+        echo "NDK_ROOT=$PWD/android-ndk-r27" >> $GITHUB_ENV
         
-    - name: Clone v2ray-core to build dir
+    - name: Relink native library with 16KB alignment
       run: |
-        cd /tmp/build
-        git clone --depth 1 https://github.com/v2fly/v2ray-core.git
+        cd aar_extracted/jni/arm64-v8a
         
-    - name: Create libv2ray in build dir
+        # Backup original
+        cp libgojni.so libgojni.so.backup
+        
+        # Use NDK linker to relink with 16KB page size
+        $NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
+          -shared \
+          -Wl,-soname,libgojni.so \
+          -Wl,-z,max-page-size=0x4000 \
+          -Wl,--whole-archive libgojni.so.backup -Wl,--no-whole-archive \
+          -o libgojni.so
+          
+    - name: Verify new alignment
       run: |
-        cd /tmp/build
-        mkdir -p libv2ray
-        cat > libv2ray/libv2ray.go << 'EOF'
-        package libv2ray
-
-        import (
-            "context"
-            "errors"
-            "fmt"
-            "strings"
-            "sync"
-
-            v2core "github.com/v2fly/v2ray-core/v5"
-            v2stats "github.com/v2fly/v2ray-core/v5/app/stats"
-            v2serial "github.com/v2fly/v2ray-core/v5/infra/conf/serial"
-            _ "github.com/v2fly/v2ray-core/v5/main/distro/all"
-        )
-
-        type V2RayPoint struct {
-            instance   *v2core.Instance
-            statsMan   v2stats.Manager
-            isRunning  bool
-            cancelFunc context.CancelFunc
-            mu         sync.Mutex
-        }
-
-        func NewV2RayPoint() *V2RayPoint {
-            return &V2RayPoint{isRunning: false}
-        }
-
-        func (v *V2RayPoint) IsRunning() bool {
-            v.mu.Lock()
-            defer v.mu.Unlock()
-            return v.isRunning
-        }
-
-        func (v *V2RayPoint) RunLoop(configContent string) error {
-            v.mu.Lock()
-            if v.isRunning {
-                v.mu.Unlock()
-                return errors.New("already running")
-            }
-            v.mu.Unlock()
-
-            config, err := v2serial.LoadJSONConfig(strings.NewReader(configContent))
-            if err != nil {
-                return fmt.Errorf("config error: %v", err)
-            }
-
-            ctx, cancel := context.WithCancel(context.Background())
-            instance, err := v2core.New(config)
-            if err != nil {
-                cancel()
-                return fmt.Errorf("instance error: %v", err)
-            }
-
-            if err := instance.Start(); err != nil {
-                cancel()
-                return fmt.Errorf("start error: %v", err)
-            }
-
-            v.mu.Lock()
-            v.instance = instance
-            v.cancelFunc = cancel
-            v.isRunning = true
-            v.mu.Unlock()
-
-            go func() { <-ctx.Done() }()
-            return nil
-        }
-
-        func (v *V2RayPoint) StopLoop() error {
-            v.mu.Lock()
-            defer v.mu.Unlock()
-
-            if !v.isRunning {
-                return errors.New("not running")
-            }
-
-            if v.instance != nil {
-                v.instance.Close()
-                v.instance = nil
-            }
-
-            if v.cancelFunc != nil {
-                v.cancelFunc()
-                v.cancelFunc = nil
-            }
-
-            v.isRunning = false
-            return nil
-        }
-        EOF
+        echo "New page alignment (should be 0x4000 = 16KB):"
+        readelf -l aar_extracted/jni/arm64-v8a/libgojni.so | grep LOAD
         
-    - name: Setup module
+    - name: Repack AAR
       run: |
-        cd /tmp/build/libv2ray
-        go mod init libv2ray
-        go get github.com/v2fly/v2ray-core/v5@latest
-        go mod tidy
+        cd aar_extracted
+        zip -r ../libv2ray-16kb.aar *
+        cd ..
+        ls -lh libv2ray-16kb.aar
         
-    - name: Build AAR
-      run: |
-        export PATH=$HOME/go/bin:$PATH
-        export ANDROID_HOME=$ANDROID_SDK_ROOT
-        export ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973
-        cd /tmp/build
-        $HOME/go/bin/gomobile bind -v -target=android -androidapi=21 -ldflags="-s -w" -o libv2ray-16kb.aar ./libv2ray
-        
-    - name: Copy to workspace
-      run: |
-        cp /tmp/build/libv2ray-16kb.aar $GITHUB_WORKSPACE/
-        ls -lh $GITHUB_WORKSPACE/libv2ray-16kb.aar
-        
-    - name: Upload
+    - name: Upload patched AAR
       uses: actions/upload-artifact@v4
       with:
-        name: libv2ray-16kb-FINAL
+        name: libv2ray-16kb-PATCHED
         path: libv2ray-16kb.aar
