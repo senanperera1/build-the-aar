@@ -8,6 +8,14 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+    - name: Checkout dummy repo
+      run: |
+        mkdir -p $GITHUB_WORKSPACE
+        cd $GITHUB_WORKSPACE
+        git init
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        
     - name: Setup Go
       uses: actions/setup-go@v5
       with:
@@ -31,15 +39,24 @@ jobs:
       run: |
         go install golang.org/x/mobile/cmd/gomobile@latest
         go install golang.org/x/mobile/cmd/gobind@latest
-        gomobile init
+        $HOME/go/bin/gomobile init
         
-    - name: Clone v2ray-core
-      run: git clone --depth 1 -b v5.16.1 https://github.com/v2fly/v2ray-core.git
-        
-    - name: Create wrapper
+    - name: Create GOPATH structure
       run: |
-        mkdir -p libv2ray
-        cat > libv2ray/libv2ray.go << 'EOF'
+        mkdir -p $HOME/gopath/src
+        echo "GOPATH=$HOME/gopath" >> $GITHUB_ENV
+        
+    - name: Clone v2ray-core to GOPATH
+      run: |
+        mkdir -p $HOME/gopath/src/github.com/v2fly
+        cd $HOME/gopath/src/github.com/v2fly
+        git clone --depth 1 -b v5.16.1 https://github.com/v2fly/v2ray-core.git
+        
+    - name: Create libv2ray in GOPATH
+      run: |
+        mkdir -p $HOME/gopath/src/libv2ray
+        cd $HOME/gopath/src/libv2ray
+        cat > libv2ray.go << 'EOF'
         package libv2ray
 
         import (
@@ -131,23 +148,39 @@ jobs:
         }
         EOF
 
-    - name: Setup go.mod
+    - name: Initialize go module
       run: |
-        cd libv2ray
-        go mod init libv2ray
-        go mod edit -require=github.com/v2fly/v2ray-core/v5@v5.16.1
-        go mod tidy
+        cd $HOME/gopath/src/libv2ray
+        go mod init libv2ray || true
+        go mod edit -require=github.com/v2fly/v2ray-core/v5@v5.16.1 || true
+        go mod tidy || true
         
-    - name: Build AAR
+    - name: Download dependencies
+      run: |
+        cd $HOME/gopath/src/libv2ray
+        go get github.com/v2fly/v2ray-core/v5@v5.16.1 || true
+        go mod download || true
+        
+    - name: Build AAR with all fixes
       run: |
         export PATH=$PATH:$HOME/go/bin
-        export GO111MODULE=on
-        gomobile bind -v -target=android -androidapi=21 -ldflags="-s -w" -o libv2ray.aar ./libv2ray
+        export GOPATH=$HOME/gopath
+        export GO111MODULE=auto
+        export CGO_ENABLED=1
+        cd $HOME/gopath/src
+        echo "Building from: $(pwd)"
+        ls -la
+        $HOME/go/bin/gomobile bind -v -target=android -androidapi=21 -ldflags="-s -w" -o $GITHUB_WORKSPACE/libv2ray.aar libv2ray
       env:
         ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        
+    - name: Verify AAR exists
+      run: |
+        ls -lh $GITHUB_WORKSPACE/libv2ray.aar || echo "AAR NOT FOUND!"
+        file $GITHUB_WORKSPACE/libv2ray.aar || echo "Cannot check file type"
           
     - name: Upload AAR
       uses: actions/upload-artifact@v4
       with:
         name: libv2ray-16kb-aar
-        path: libv2ray.aar
+        path: ${{ github.workspace }}/libv2ray.aar
